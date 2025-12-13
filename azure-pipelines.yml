@@ -1,0 +1,187 @@
+trigger:
+  - main
+
+parameters:
+  - name: environment
+    displayName: Target Environment
+    type: string
+    default: dev
+    values:
+      - dev
+      - test
+      - prod
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  serviceConnection: 'azure-connection-name'
+  resourceGroup: 'terraform-state-rg'
+  storageAccount: 'tfstateunique12345'
+  container: 'tfstate'
+  key: '${{ parameters.environment }}.terraform.tfstate'
+  environment: ${{ parameters.environment }}
+
+stages:
+  - stage: Validate
+    displayName: 'Validation & Linting'
+    jobs:
+      - job: Lint
+        displayName: 'Lint Code'
+        steps:
+          - task: TerraformInstaller@0
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: 'latest'
+
+          - script: terraform fmt -check -recursive
+            displayName: 'Terraform Format Check'
+            workingDirectory: '$(System.DefaultWorkingDirectory)'
+
+      - job: Validate
+        displayName: 'Validate Config'
+        dependsOn: Lint
+        steps:
+          - task: TerraformInstaller@0
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: 'latest'
+
+          - script: |
+              terraform init -backend=false
+              terraform validate
+            workingDirectory: '$(System.DefaultWorkingDirectory)/environments/$(environment)'
+            displayName: 'Terraform Validate'
+
+  - stage: Plan
+    displayName: 'Terraform Plan'
+    dependsOn: Validate
+    jobs:
+      - job: Plan
+        displayName: 'Plan Infrastructure'
+        steps:
+          - task: TerraformInstaller@0
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: 'latest'
+
+          - script: |
+              terraform init \
+                -backend-config="resource_group_name=$(resourceGroup)" \
+                -backend-config="storage_account_name=$(storageAccount)" \
+                -backend-config="container_name=$(container)" \
+                -backend-config="key=$(key)"
+            workingDirectory: '$(System.DefaultWorkingDirectory)/environments/$(environment)'
+            displayName: 'Terraform Init'
+            env:
+              ARM_SUBSCRIPTION_ID: $(subscriptionId)
+
+          - task: TerraformTaskV4@4
+            displayName: 'Terraform Plan'
+            inputs:
+              provider: 'azurerm'
+              command: 'plan'
+              workingDirectory: '$(System.DefaultWorkingDirectory)/environments/$(environment)'
+              commandOptions: '-out=tfplan'
+              environmentServiceNameAzureRM: '$(serviceConnection)'
+
+          - script: |
+              # Convert plan to JSON
+              cd $(System.DefaultWorkingDirectory)/environments/$(environment)
+              terraform show -json tfplan > tfplan.json
+              
+              # Extract Key Details using JQ
+              # This extracts changes to aks cluster and node pool
+              echo "Extracting details..."
+              
+              DETAILS=$(jq -r '
+                .resource_changes[] 
+                | select(.type == "azurerm_kubernetes_cluster" or .type == "azurerm_kubernetes_cluster_node_pool")
+                | select(.change.actions[] | contains("no-op") | not)
+                | "Resource: \(.name)\n  Action: \(.change.actions | join(","))\n  Version: \(.change.after.kubernetes_version // .change.after.orchestrator_version)\n  Node Count: \(.change.after.default_node_pool[0].node_count // .change.after.node_count)\n  VM Size: \(.change.after.default_node_pool[0].vm_size // .change.after.vm_size)\n-------------------\n"
+              ' tfplan.json)
+              
+              # Handle empty details (no changes)
+              if [ -z "$DETAILS" ]; then
+                DETAILS="No significant changes detailed in AKS/NodePools."
+              fi
+              
+              echo "Plan Details:"
+              echo "$DETAILS"
+              
+              # Set variable for next stage. Encode newlines.
+              DETAILS="${DETAILS//$'\n'/'%0A'}"
+              echo "##vso[task.setvariable variable=PlanDetails;isOutput=true]$DETAILS"
+            displayName: 'Analyze Plan'
+            name: SetVars
+
+          - publish: '$(System.DefaultWorkingDirectory)/environments/$(environment)/tfplan'
+            artifact: tfplan
+            displayName: 'Publish Plan Artifact'
+
+  - stage: Review
+    displayName: 'Manual Review'
+    dependsOn: Plan
+    jobs:
+      - job: WaitForValidation
+        displayName: 'Wait for External Validation'
+        pool: server
+        variables:
+          PlanDetails: $[ stageDependencies.Plan.Plan.outputs['SetVars.PlanDetails'] ]
+        steps:
+          - task: ManualValidation@0
+            timeoutInMinutes: 1440 # 1 day
+            inputs:
+              notifyUsers: |
+                user@example.com
+              instructions: |
+                Please review the Terraform Plan for $(environment) environment.
+                
+                Changes Detected:
+                $(PlanDetails)
+                
+                Check the Pipeline Logs for the full Plan output.
+              onTimeout: 'reject'
+
+  - stage: Apply
+    displayName: 'Terraform Apply'
+    dependsOn: Review
+    jobs:
+      - deployment: Apply
+        displayName: 'Apply Infrastructure'
+        environment: ${{ parameters.environment }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - download: current
+                  artifact: tfplan
+                  displayName: 'Download Plan Artifact'
+
+                - task: TerraformInstaller@0
+                  displayName: 'Install Terraform'
+                  inputs:
+                    terraformVersion: 'latest'
+
+                - task: TerraformTaskV4@4
+                  displayName: 'Terraform Init'
+                  inputs:
+                    provider: 'azurerm'
+                    command: 'init'
+                    workingDirectory: '$(System.DefaultWorkingDirectory)/environments/$(environment)'
+                    backendServiceArm: '$(serviceConnection)'
+                    backendAzureRmResourceGroupName: '$(resourceGroup)'
+                    backendAzureRmStorageAccountName: '$(storageAccount)'
+                    backendAzureRmContainerName: '$(container)'
+                    backendAzureRmKey: '$(key)'
+
+                - task: TerraformTaskV4@4
+                  displayName: 'Terraform Apply'
+                  inputs:
+                    provider: 'azurerm'
+                    command: 'apply'
+                    workingDirectory: '$(System.DefaultWorkingDirectory)/environments/$(environment)'
+                    commandOptions: '$(Pipeline.Workspace)/tfplan/tfplan'
+                    environmentServiceNameAzureRM: '$(serviceConnection)'
