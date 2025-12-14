@@ -10,10 +10,7 @@ parameters:
       - dev
       - test
       - prod
-  - name: terraformDestroy
-    displayName: 'Destroy Infrastructure?'
-    type: boolean
-    default: false
+
 
 pool:
   vmImage: 'ubuntu-latest'
@@ -25,10 +22,8 @@ variables:
   container: '${{ parameters.environment }}-tfstateunique12345'
   key: '${{ parameters.environment }}.terraform.tfstate'
   environment: ${{ parameters.environment }}
-  ${{ if eq(parameters.terraformDestroy, true) }}:
-    destroyFlag: '-destroy'
-  ${{ else }}:
-    destroyFlag: ''
+  # Destroy logic is now dynamic based on DESTROY_TRIGGER file
+  destroyFlag: ''
 
 stages:
   - stage: Validate
@@ -73,6 +68,18 @@ stages:
             inputs:
               terraformVersion: 'latest'
 
+          - script: |
+              if [ -f "DESTROY_TRIGGER" ]; then
+                echo "##vso[task.setvariable variable=destroyFlag]-destroy"
+                echo "##vso[task.setvariable variable=isDestroy]true"
+                echo "WARNING: Destroy Trigger Found!"
+              else
+                echo "##vso[task.setvariable variable=destroyFlag]"
+                echo "##vso[task.setvariable variable=isDestroy]false"
+              fi
+            workingDirectory: '$(System.DefaultWorkingDirectory)/environments/$(environment)'
+            displayName: 'Check Destroy Mode'
+
           - task: TerraformTaskV4@4
             displayName: 'Terraform Init'
             inputs:
@@ -101,6 +108,14 @@ stages:
               # Construct the display message
               DETAILS="Target Environment: $(environment)"
               DETAILS+=$'\n'
+              
+              if [ "$(isDestroy)" == "true" ]; then
+                 DETAILS+="⚠️⚠️⚠️ WARNING: CLUSTER WILL BE DESTROYED ⚠️⚠️⚠️"
+                 DETAILS+=$'\n'
+                 DETAILS+="The DESTROY_TRIGGER file was found."
+                 DETAILS+=$'\n'
+              fi
+              
               DETAILS+="Plan Details:"
               DETAILS+=$'\n'
               DETAILS+="$PLAN_TEXT"
