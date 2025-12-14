@@ -1,83 +1,222 @@
-# Pipeline Configuration Explained
-This document provides a detailed breakdown of the `azure-pipelines.yml` file used for the AKS Cluster project.
+# Azure Pipeline Configuration - Detailed Explanation
 
-## 1. Trigger
+This document provides a comprehensive, line-by-line breakdown of the `azure-pipelines.yml` file.
+
+## Trigger
 ```yaml
 trigger:
   - main
 ```
-*   **Purpose**: Defines when the pipeline runs automatically.
-*   **Logic**: Monitoring the `main` branch. Any commit pushed to `main` triggers a run.
+*   **`trigger`**: Defines the CI (Continuous Integration) trigger rules.
+*   **`- main`**: The pipeline will automatically start whenever code is pushed to the `main` branch.
 
-## 2. Parameters
-Runtime inputs you can set when manually queuing the pipeline.
+## Parameters
+Parameters allow you to provide input when manually triggering the pipeline.
 ```yaml
 parameters:
   - name: environment
+    displayName: Target Environment
+    type: string
     default: dev
-    values: [dev, test, prod]
+    values:
+      - dev
+      - test
+      - prod
+```
+*   **`name: environment`**: Internal variable name `params.environment`.
+*   **`displayName`**: The label shown in the Azure DevOps UI (e.g., "Target Environment").
+*   **`values`**: Dropdown list restrictions. You can only pick `dev`, `test`, or `prod`.
+
+```yaml
   - name: terraformDestroy
+    displayName: 'Destroy Infrastructure?'
     type: boolean
     default: false
 ```
-*   **environment**: Selects which environment folder (dev/test/prod) Terraform should run against.
-*   **terraformDestroy**: A checkbox. If checked (`true`), the pipeline switches to "Destroy Mode" to delete the infrastructure.
+*   **`name: terraformDestroy`**: Boolean switch (Checkbox).
+*   **`default: false`**: Unchecked by default for safety. If checked (`true`), checking this box intends to destroy resources.
 
-## 3. Variables
-Dynamic values used throughout the pipeline.
+## Build Agent Pool
+```yaml
+pool:
+  vmImage: 'ubuntu-latest'
+```
+*   **`pool`**: Specifies the build agent infrastructure.
+*   **`vmImage`**: Uses a Microsoft-hosted Ubuntu Linux agent.
+
+## Variables
 ```yaml
 variables:
-  serviceConnection: 'azure-connection-name'  # The valid AZ service connection in ADO
-  storageAccount: 'tfstateunique281012345'    # Azure Storage Account for TF State
-  container: '${{ parameters.environment }}-tfstateunique12345' # Dynamic container name (e.g., dev-tfstate...)
-  key: '${{ parameters.environment }}.terraform.tfstate'        # Stat file name
-  
-  # Logic to set the destroy flag based on the Checkbox parameter
-  ${{ if eq(parameters.terraformDestroy, true) }}:
-    destroyFlag: '-destroy'  # Adds -destroy to the plan command
-  ${{ else }}:
-    destroyFlag: ''          # Empty for normal deployment
+  serviceConnection: 'azure-connection-name'
 ```
+*   **`serviceConnection`**: The name of the Service Connection in Azure DevOps Project Settings used to authenticate with Azure.
 
-## 4. Stages
+```yaml
+  resourceGroup: 'terraform-state-rg'
+  storageAccount: 'tfstateunique281012345'
+  container: '${{ parameters.environment }}-tfstateunique12345'
+  key: '${{ parameters.environment }}.terraform.tfstate'
+```
+*   **`storageAccount`**: The Azure Storage Account where Terraform state is stored.
+*   **`container`**: Dynamically names the container based on the environment (e.g., `dev-tfstate...`).
+*   **`key`**: The specific state file name (e.g., `dev.terraform.tfstate`).
+
+```yaml
+  environment: ${{ parameters.environment }}
+```
+*   **`environment`**: Maps the parameter value to a pipeline variable `$(environment)` for easier use in tasks.
+
+### Conditional Variable Logic
+```yaml
+  ${{ if eq(parameters.terraformDestroy, true) }}:
+    destroyFlag: '-destroy'
+  ${{ else }}:
+    destroyFlag: ''
+```
+*   **Logic**: Checks if the "Destroy Infrastructure?" checkbox was ticked.
+*   **`destroyFlag: '-destroy'`**: If true, sets this variable to `-destroy`. This string is later passed to the `terraform plan` command.
+*   **`destroyFlag: ''`**: If false, keeps it empty (Normal Plan).
+
+---
+
+## Stages
 
 ### Stage 1: Validate
-**Goal**: Check code quality before doing anything real.
-*   **Lint Job**: Runs `terraform fmt -check` to ensure code style compliance.
-*   **Validate Job**: Runs `terraform validate`.
-    *   *Note*: Uses `terraform init -backend=false` because validation doesn't need the remote state to check syntax.
+```yaml
+stages:
+  - stage: Validate
+    displayName: 'Validation & Linting'
+```
+*   **Purpose**: Validates code syntax and style before any remote connection.
+
+#### Job: Lint
+```yaml
+      - job: Lint
+        steps:
+          - task: TerraformInstaller@0
+            inputs:
+              terraformVersion: 'latest'
+          - script: terraform fmt -check -recursive
+```
+*   **`terraform fmt -check`**: Checks if code is properly formatted (canonical format). Fails if code is messy.
+
+#### Job: Validate
+```yaml
+      - job: Validate
+        dependsOn: Lint
+        steps:
+          - script: |
+              terraform init -backend=false
+              terraform validate
+            workingDirectory: '$(System.DefaultWorkingDirectory)/environments/$(environment)'
+```
+*   **`dependsOn: Lint`**: Waits for Lint to pass.
+*   **`init -backend=false`**: Initializes Terraform locally without connecting to Azure (faster/safer for just validation).
+*   **`validate`**: Checks for syntax errors and valid argument references.
 
 ### Stage 2: Plan
-**Goal**: Calculate what Terraform *would* do.
-*   **Terraform Init**: Connects to the real Azure Backend (Storage Account) using the Service Connection.
-*   **Terraform Plan**:
-    *   Command: `terraform plan -out=tfplan -no-color $(destroyFlag)`
-    *   `no-color`: Ensures logs are clean plain text.
-    *   `$(destroyFlag)`: Injects `-destroy` if you checked the box.
-    *   `-out=tfplan`: Saves the plan to a file.
-*   **Analyze Plan (Script)**:
-    *   `terraform show ... | perl ...`: Reads the plan and strips hidden "ANSI" color characters so it looks clean in the popup.
-    *   **Warning Logic**: If `destroyFlag` is set, it creates a `⚠️ WARNING` message.
-    *   **Output**: Saves the text to a variable `PlanDetails` to show in the next stage.
-*   **Publish**: Uploads the `tfplan` file as an artifact so the specific plan can be used later.
+```yaml
+  - stage: Plan
+    jobs:
+      - job: Plan
+        steps:
+```
+
+#### Step: Terraform Init (Real)
+```yaml
+          - task: TerraformTaskV4@4
+            inputs:
+              command: 'init'
+              backendServiceArm: '$(serviceConnection)'
+              ...
+```
+*   **`TerraformTaskV4`**: Official Microsoft task for Terraform.
+*   **`command: 'init'`**: Initializes the backend, downloading the state from Azure Storage.
+
+#### Step: Terraform Plan
+```yaml
+          - task: TerraformTaskV4@4
+            inputs:
+              command: 'plan'
+              commandOptions: '-out=tfplan -no-color $(destroyFlag)'
+              environmentServiceNameAzureRM: '$(serviceConnection)'
+```
+*   **`command: 'plan'`**: Generates an execution plan.
+*   **`-out=tfplan`**: Saves the plan to a binary file `tfplan`.
+*   **`-no-color`**: Disables color codes in logs for readability.
+*   **`$(destroyFlag)`**: Injects `-destroy` if the checkbox was selected.
+
+#### Step: Analyze Plan (Bash Script)
+```yaml
+          - script: |
+              PLAN_TEXT=$(terraform show -no-color tfplan | perl -pe 's/\e\[?.*?[\@-~]//g')
+```
+*   **`terraform show`**: Converts the binary `tfplan` into readable text.
+*   **`perl ...`**: A regex command to strip invisible ANSI color codes that Terraform might still output.
+
+```yaml
+              DETAILS="Target Environment: $(environment)"
+              if [ "$(destroyFlag)" == "-destroy" ]; then
+                 DETAILS+="⚠️⚠️⚠️ WARNING: CLUSTER WILL BE DESTROYED ⚠️⚠️⚠️"
+              fi
+```
+*   **Logic**: If destroying, it prepends a generic Warning message to the details.
+
+```yaml
+              echo "##vso[task.setvariable variable=PlanDetails;isOutput=true]$DETAILS"
+```
+*   **`##vso` command**: A special log command that sets an Azure DevOps variable `PlanDetails` to be available in future stages.
+
+#### Step: Publish Artifact
+```yaml
+          - publish: ...
+            artifact: tfplan
+```
+*   **Purpose**: Uploads the `tfplan` file so the *Apply* stage can download and use the exact same plan later.
 
 ### Stage 3: Review
-**Goal**: Pause and ask for human approval.
-*   **ManualValidation Task**:
-    *   Pauses the pipeline.
-    *   Sends an email to `user@example.com` (configurable).
-    *   Displays the `PlanDetails` (from the previous stage) in the Azure DevOps UI.
-    *   You must click "Resume" (Approve) or "Reject".
+```yaml
+  - stage: Review
+    jobs:
+      - job: WaitForValidation
+        pool: server
+```
+*   **`pool: server`**: Runs on the Azure DevOps server (agentless), not an agent machine. Used for waiting/approvals.
+
+#### Step: Manual Validation
+```yaml
+          - task: ManualValidation@0
+            inputs:
+              instructions: |
+                Changes Detected:
+                $(PlanDetails)
+```
+*   **`ManualValidation`**: Pauses the pipeline execution.
+*   **`$(PlanDetails)`**: Displays the text captured in the previous stage for human review.
 
 ### Stage 4: Apply
-**Goal**: Execute the changes.
-*   **Condition**: 
-    `and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'), ne(variables['Build.Reason'], 'PullRequest'))`
-    *   **Safety Rule**: This stage ONLY runs if:
-        1.  Previous stages passed.
-        2.  You are on the **Main Branch**.
-        3.  This is **NOT** a Pull Request.
-*   **Steps**:
-    1.  **Download**: Gets the `tfplan` artifact from the Plan stage.
-    2.  **Show Plan**: Prints the plan again for final verification in logs.
-    3.  **Terraform Apply**: Runs `terraform apply tfplan`. exact execution of the file generated in the Plan stage.
+```yaml
+  - stage: Apply
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'), ne(variables['Build.Reason'], 'PullRequest'))
+```
+*   **`condition`**: Critical safety logic. The job ONLY runs if:
+    1.  **`succeeded()`**: Previous stages passed.
+    2.  **`eq(main)`**: The branch is exactly `main`.
+    3.  **`ne(PullRequest)`**: This is NOT a Pull Request build.
+
+#### Job: Deployment
+```yaml
+      - deployment: Apply
+        environment: ${{ parameters.environment }}
+```
+*   **`deployment`**: A special job type that tracks "Deployments" in ADO Environments.
+
+#### Step: Terraform Apply
+```yaml
+                - task: TerraformTaskV4@4
+                  inputs:
+                    command: 'apply'
+                    commandOptions: '$(Pipeline.Workspace)/tfplan/tfplan'
+```
+*   **`command: 'apply'`**: Applies the changes.
+*   **`commandOptions`**: Points to the downloaded `tfplan` artifact. This ensures we apply *exactly* what was reviewed, with no new calculation.
