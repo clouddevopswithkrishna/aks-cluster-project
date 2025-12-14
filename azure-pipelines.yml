@@ -21,7 +21,7 @@ pool:
 variables:
   serviceConnection: 'azure-connection-name'
   resourceGroup: 'terraform-state-rg'
-  storageAccount: 'tfstateunique000281012345'
+  storageAccount: 'tfstateunique281012345'
   container: '${{ parameters.environment }}-tfstateunique12345'
   key: '${{ parameters.environment }}.terraform.tfstate'
   environment: ${{ parameters.environment }}
@@ -152,6 +152,7 @@ stages:
   - stage: Apply
     displayName: 'Terraform Apply'
     dependsOn: Review
+    condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
     jobs:
       - deployment: Apply
         displayName: 'Apply Infrastructure'
