@@ -73,16 +73,17 @@ stages:
             inputs:
               terraformVersion: 'latest'
 
-          - script: |
-              terraform init \
-                -backend-config="resource_group_name=$(resourceGroup)" \
-                -backend-config="storage_account_name=$(storageAccount)" \
-                -backend-config="container_name=$(container)" \
-                -backend-config="key=$(key)"
-            workingDirectory: '$(System.DefaultWorkingDirectory)/environments/$(environment)'
+          - task: TerraformTaskV4@4
             displayName: 'Terraform Init'
-            env:
-              ARM_SUBSCRIPTION_ID: $(subscriptionId)
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              workingDirectory: '$(System.DefaultWorkingDirectory)/environments/$(environment)'
+              backendServiceArm: '$(serviceConnection)'
+              backendAzureRmResourceGroupName: '$(resourceGroup)'
+              backendAzureRmStorageAccountName: '$(storageAccount)'
+              backendAzureRmContainerName: '$(container)'
+              backendAzureRmKey: '$(key)'
 
           - task: TerraformTaskV4@4
             displayName: 'Terraform Plan'
