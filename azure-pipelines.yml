@@ -86,30 +86,27 @@ stages:
               environmentServiceNameAzureRM: '$(serviceConnection)'
 
           - script: |
-              # Convert plan to JSON
-              cd $(System.DefaultWorkingDirectory)/environments/$(environment)
-              terraform show -json tfplan > tfplan.json
+              # Capture full human-readable plan
+              PLAN_TEXT=$(terraform show -no-color tfplan)
               
-              # Extract Key Details using JQ
-              # This extracts changes to aks cluster and node pool
-              echo "Extracting details..."
+              # Construct the display message
+              DETAILS="Target Environment: $(environment)"
+              DETAILS+=$'\n'
+              DETAILS+="Plan Details:"
+              DETAILS+=$'\n'
+              DETAILS+="$PLAN_TEXT"
               
-              DETAILS=$(jq -r '
-                .resource_changes[] 
-                | select(.type == "azurerm_kubernetes_cluster" or .type == "azurerm_kubernetes_cluster_node_pool")
-                | select(.change.actions[] | contains("no-op") | not)
-                | "Resource: \(.name)\n  Action: \(.change.actions | join(","))\n  Version: \(.change.after.kubernetes_version // .change.after.orchestrator_version)\n  Node Count: \(.change.after.default_node_pool[0].node_count // .change.after.node_count)\n  VM Size: \(.change.after.default_node_pool[0].vm_size // .change.after.vm_size)\n-------------------\n"
-              ' tfplan.json)
-              
-              # Handle empty details (no changes)
-              if [ -z "$DETAILS" ]; then
-                DETAILS="No significant changes detailed in AKS/NodePools."
+              # Handle empty details (safety check)
+              if [ -z "$PLAN_TEXT" ]; then
+                DETAILS="Target Environment: $(environment)"
+                DETAILS+=$'\n'
+                DETAILS+="No changes detected or plan is empty."
               fi
               
               echo "Plan Details:"
               echo "$DETAILS"
-              
-              # Set variable for next stage. Encode newlines.
+               
+              # Set variable for next stage. Encode newlines for ADO variable.
               DETAILS="${DETAILS//$'\n'/'%0A'}"
               echo "##vso[task.setvariable variable=PlanDetails;isOutput=true]$DETAILS"
             displayName: 'Analyze Plan'
