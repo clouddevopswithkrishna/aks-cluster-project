@@ -19,26 +19,27 @@ This pipeline automates the lifecycle of your AKS cluster on Azure.
 
 ## 2. How to Destroy the Cluster
 
-### Method A: Via Pull Request (The "Safe" Way)
-Use this when you want an audit trail of the destruction.
+### Method A: Manual Run (Ad-hoc)
+Use this to destroy the cluster interactively.
 
-1.  **Create Trigger**: In your environment folder (e.g., `environments/dev`), create a **new empty file** named `DESTROY_TRIGGER`.
-2.  **Raise PR**: Push and raise a PR with this file.
-3.  **Review**: The pipeline will detect the file and run `terraform plan -destroy`.
-    *   The Manual Review screen will show: `⚠️⚠️⚠️ WARNING: CLUSTER WILL BE DESTROYED ⚠️⚠️⚠️`.
-4.  **Merge**: Approve and merge the PR.
-5.  **Execute**: The `main` branch pipeline will run and **Destroy** the cluster.
-
-> **To Restore**: Raise a new PR that **deletes** the `DESTROY_TRIGGER` file. The pipeline will then switch back to Normal Mode and re-create the cluster on the next run.
-
-### Method B: Manual Run (Ad-hoc)
 1.  Go to Azure DevOps Pipelines -> Click "Run Pipeline".
-2.  (Note: we removed the checkbox to support automation, so Method A is preferred. If you really need manual run without file, you must edit `terraform.tfvars` locally first).
+2.  Select Branch: `main` (Only main can Apply/Destroy).
+3.  **Check the box**: "Destroy Infrastructure?".
+4.  **Review**: The Warning and Plan will appear in the Manual Review step.
+5.  **Approve**: Clicking approved triggers the destruction.
+
+### Method B: Via Pull Request (The "GitOps" Way)
+To destroy via PR (without the checkbox), you must verify the destruction by deleting the code.
+
+1.  **Delete Code**: In a branch, delete the module block for `aks_cluster` in `main.tf`.
+2.  **Raise PR**: The pipeline will see code is missing and plan a destroy.
+3.  **Merge**: Merging to main triggers the actual destruction.
 
 ---
 
-## 3. Important Notes
+## 3. Important Rules
 
-*   **Variables**: All variables (Cluster Name, etc.) are read from `terraform.tfvars` in the repo.
-*   **Branch Protection**: You MUST configure Azure DevOps Branch Policies to prevent direct pushes to `main`. (See `BRANCH_PROTECTION.md`).
-*   **Environment Gate**: The "Post-deployment" Manual Validation in Azure (the second pop-up) is optional. We recommend disabling it since our pipeline has its own "Manual Review" step with better details.
+*   **Main Branch Only**: The `Apply` stage (Deploy/Destroy) ONLY runs on the `main` branch.
+*   **Feature Branches**: Running the pipeline on any other branch will **Skip Apply** (Plan Only).
+*   **Variables**: All variables (Cluster Name, etc.) are read from `terraform.tfvars`.
+*   **Branch Protection**: Don't forget to enable Branch Policies!
