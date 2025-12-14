@@ -11,9 +11,7 @@ environments/*/.terraform/
 crash.log
 crash.*.log
 
-# Exclude all .tfvars files
-*.tfvars
-*.tfvars.json
+
 
 # Ignore override files as they are usually used to override resources locally and so
 # are not checked in

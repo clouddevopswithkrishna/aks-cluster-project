@@ -10,6 +10,10 @@ parameters:
       - dev
       - test
       - prod
+  - name: terraformDestroy
+    displayName: 'Destroy Infrastructure?'
+    type: boolean
+    default: false
 
 pool:
   vmImage: 'ubuntu-latest'
@@ -17,10 +21,14 @@ pool:
 variables:
   serviceConnection: 'azure-connection-name'
   resourceGroup: 'terraform-state-rg'
-  storageAccount: 'tfstateunique12345'
-  container: 'tfstate'
+  storageAccount: 'tfstateunique000281012345'
+  container: '${{ parameters.environment }}-tfstateunique12345'
   key: '${{ parameters.environment }}.terraform.tfstate'
   environment: ${{ parameters.environment }}
+  ${{ if eq(parameters.terraformDestroy, true) }}:
+    destroyFlag: '-destroy'
+  ${{ else }}:
+    destroyFlag: ''
 
 stages:
   - stage: Validate
@@ -82,7 +90,7 @@ stages:
               provider: 'azurerm'
               command: 'plan'
               workingDirectory: '$(System.DefaultWorkingDirectory)/environments/$(environment)'
-              commandOptions: '-out=tfplan'
+              commandOptions: '-out=tfplan $(destroyFlag)'
               environmentServiceNameAzureRM: '$(serviceConnection)'
 
           - script: |
@@ -173,6 +181,13 @@ stages:
                     backendAzureRmStorageAccountName: '$(storageAccount)'
                     backendAzureRmContainerName: '$(container)'
                     backendAzureRmKey: '$(key)'
+
+                - script: |
+                    echo "Target Environment: $(environment)"
+                    echo "Displaying Plan for Verification:"
+                    terraform show -no-color $(Pipeline.Workspace)/tfplan/tfplan
+                  displayName: 'Show Plan'
+                  workingDirectory: '$(System.DefaultWorkingDirectory)/environments/$(environment)'
 
                 - task: TerraformTaskV4@4
                   displayName: 'Terraform Apply'
